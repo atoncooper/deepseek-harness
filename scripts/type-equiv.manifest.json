@@ -470,6 +470,11 @@
     },
     {
       "doc": "docs/subsystems/session.md",
+      "symbol": "SurfaceFoldRewind",
+      "source": "packages/core/session/src/surface.ts"
+    },
+    {
+      "doc": "docs/subsystems/session.md",
       "symbol": "SurfaceFoldResult",
       "source": "packages/core/session/src/surface.ts"
     },

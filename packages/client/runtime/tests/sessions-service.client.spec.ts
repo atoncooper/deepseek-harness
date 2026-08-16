@@ -594,6 +594,41 @@ describe('fork', () => {
   })
 })
 
+describe('rewind', () => {
+  it('rewinds through the wire and resolves the durable marker seq', async () => {
+    const b = bench()
+    await feedList(b, [{ id: 'source', cwd: '/work' }])
+    b.api.onRewind = () => Promise.resolve(ok({ markerSeq: 9 }))
+
+    await expect(b.svc.rewind({
+      sessionId: sid('source'), atSeq: 7, note: 'try again',
+    })).resolves.toBe(9)
+
+    expect(b.api.callsOf('session.rewind')).toEqual([{ sessionId: 'source', atSeq: 7, note: 'try again' }])
+  })
+
+  it('floors a fractional anchor to the real event seq the wire accepts', async () => {
+    const b = bench()
+    await feedList(b, [{ id: 'source', cwd: '/work' }])
+    b.api.onRewind = () => Promise.resolve(ok({ markerSeq: 3 }))
+
+    await expect(b.svc.rewind({ sessionId: sid('source'), atSeq: 41.1 })).resolves.toBe(3)
+
+    expect(b.api.callsOf('session.rewind')).toEqual([{ sessionId: 'source', atSeq: 41 }])
+  })
+
+  it('maps a host rewind rejection to SessionRewindError', async () => {
+    const b = bench()
+    await feedList(b, [{ id: 'source' }])
+    b.api.onRewind = () => Promise.resolve(err({
+      code: 'rewind-unavailable', message: 'turn still open', details: { sessionId: sid('source') },
+    }))
+
+    await expect(b.svc.rewind({ sessionId: sid('source'), atSeq: 3 }))
+      .rejects.toThrow('session rewind failed: rewind-unavailable: turn still open')
+  })
+})
+
 describe('scope lifecycle rides the list mirror (entity parity: no client-side pre-birth)', () => {
   it('a session-added frame births the row (blank) and makes the scope resolvable; removal prunes it', async () => {
     const b = bench()

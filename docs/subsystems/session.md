@@ -121,6 +121,24 @@ interface SessionEventMap {
    * so tolerating concurrent writers needs a signal beyond the log.
    */
   'session/end-seed': Record<string, never>
+  /**
+   * Rebases the derived surface to an earlier event. Visible history becomes
+   * the events up to `checkpointSeq` (inclusive); the span between the
+   * checkpoint and this event is voided from derived history but stays in the
+   * log, and later appends continue after this marker. Log-only: it carries
+   * no {@link SurfaceOp} and produces no LLM message itself.
+   * {@link SessionStore.rewind} appends the marker together with a
+   * model-visible notice `user/message`, so the next request sees the rebased
+   * history and a record of the rewind.
+   *
+   * Required (no `ignorable`): a reader that does not know this type must
+   * refuse to reconstruct the log, because silently skipping the marker would
+   * restore the voided span. `checkpointSeq` must reference an earlier event
+   * (`< seq`); the surface fold validates it, and `SessionStore.rewind`
+   * additionally requires the checkpoint prefix and the append-time tail to
+   * end outside an open turn.
+   */
+  'session/rewind': { checkpointSeq: number; note?: string }
 }
 ```
 
@@ -330,7 +348,7 @@ interface SessionSurface {
 
 ### `SurfaceFoldReplacement` and `SurfaceFoldResult` — a complete surface replay
 
-`foldSurface(events)` returns detached current event sequences together with the actual sequences shadowed by each declared replacement range. The live manager uses the same transitions without retaining replacement history. Its `replaceGeneration` increments for each committed replacement so incremental consumers can distinguish pure tail growth from a rewrite.
+`foldSurface(events)` returns detached current event sequences together with the actual sequences shadowed by each declared replacement range and each rewind rebase. The live manager uses the same transitions without retaining replacement history. Its `replaceGeneration` increments for each committed replacement so incremental consumers can distinguish pure tail growth from a rewrite. A `session/rewind` event rebases the surface to its `checkpointSeq` prefix: the voided span between the checkpoint and the marker stops contributing nodes, and a compaction inside that span never applies — rewinding before a compaction boundary restores the original messages. The rebase is monotonic for the manager's rewind generation, so derived-message caches invalidate on every rewind even when the replacement count does not change.
 
 ```ts type-equiv
 /** One replacement operation observed while folding a session surface. */
@@ -347,12 +365,24 @@ interface SurfaceFoldReplacement {
 ```
 
 ```ts type-equiv
+/** One rewind operation observed while folding a session surface. */
+interface SurfaceFoldRewind {
+  /** Seq of the session/rewind event that rebased the surface. */
+  seq: number
+  /** Inclusive checkpoint seq the surface was rebased to. */
+  checkpointSeq: number
+}
+```
+
+```ts type-equiv
 /** Complete result of replaying the surface operations in a session log. */
 interface SurfaceFoldResult {
   /** Current surface event sequences in model-visible order. */
   nodes: number[]
   /** Replacement operations in event order. */
   replacements: SurfaceFoldReplacement[]
+  /** Rewind operations in event order. */
+  rewinds: SurfaceFoldRewind[]
 }
 ```
 
@@ -494,15 +524,16 @@ declare class Session {
    * message-producing events maintained by `surfaceOp` markers. The
    * surface is the single source of derived history: every message-producing
    * append records its `surfaceOp`, so a raw event with no marker (a chunk, a
-   * turn boundary) is correctly absent, and a compaction `replace` deletes the
-   * shadowed nodes from the derivation. The projection rules are
+   * turn boundary) is correctly absent, a compaction `replace` deletes the
+   * shadowed nodes from the derivation, and a `session/rewind` rebases the
+   * derivation to its checkpoint. The projection rules are
    * {@link deriveEventMessage}, folded per node.
    *
    * CACHED: each surface node is projected exactly once, when first seen — a
-   * call costs O(new nodes), and a surface rewrite (a `replace`;
-   * {@link SessionSurface.replaceGeneration}) rebuilds. The returned array is
-   * a fresh snapshot per call (later appends never grow an array a caller
-   * already holds); the `Message` objects in it are SHARED and **deep-frozen**.
+   * call costs O(new nodes), and a surface rewrite (a `replace` or a
+   * `session/rewind` rebase) rebuilds. The returned array is a fresh
+   * snapshot per call (later appends never grow an array a caller already
+   * holds); the `Message` objects in it are SHARED and **deep-frozen**.
    * Their content reuses the already frozen durable event data, so the cache
    * needs no second deep clone and consumers still cannot mutate the log.
    * @returns a fresh array of the shared, frozen derived history.

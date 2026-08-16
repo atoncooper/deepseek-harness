@@ -184,7 +184,7 @@ export class TestSessions implements ISessions {
 
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
-    method: 'open' | 'openSubagent' | 'setSubagentCatalogOpen' | 'refreshSubagents'
+    method: 'open' | 'openSubagent' | 'setSubagentCatalogOpen' | 'refreshSubagents' | 'rewind'
       | 'clear' | 'search' | 'fork'
     args: unknown[]
   }[] = []
@@ -487,6 +487,17 @@ export class TestSessions implements ISessions {
   fork(opts: { sessionId: SessionId; atSeq?: number; increaseTitle?: boolean }): Promise<SessionId> {
     this.calls.push({ method: 'fork', args: [opts] })
     return Promise.resolve(opts.sessionId)
+  }
+
+  /**
+   * Recorded rewind stub: no log mutation (benches asserting the full rewind
+   * flow drive the production service; this face only proves the call).
+   * @param opts - session id, optional checkpoint anchor, and optional note.
+   * @returns a fixed durable marker seq.
+   */
+  rewind(opts: { sessionId: SessionId; atSeq?: number; note?: string }): Promise<number> {
+    this.calls.push({ method: 'rewind', args: [opts] })
+    return Promise.resolve(0)
   }
 
   /**

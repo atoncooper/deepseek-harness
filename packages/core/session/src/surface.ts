@@ -8,7 +8,11 @@
  * @module @deepseek-ai/dsh-session/surface
  */
 
-import type { Message } from '@deepseek-ai/dsh-llm'
+// The /message subpath is the browser-safe message vocabulary without the
+// index face's retry-policy value imports (dsh-timeout), so client bundles
+// can value-import it without tripping the client-bundle purity gate.
+import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
+import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SurfaceEvent, SurfaceEventType, SurfaceOp } from './types.ts'
 
 /** Runtime counterpart of the message-producing event union. */
@@ -125,12 +129,22 @@ export interface SurfaceFoldReplacement {
   shadowedSeqs: number[]
 }
 
+/** One rewind operation observed while folding a session surface. */
+export interface SurfaceFoldRewind {
+  /** Seq of the session/rewind event that rebased the surface. */
+  seq: number
+  /** Inclusive checkpoint seq the surface was rebased to. */
+  checkpointSeq: number
+}
+
 /** Complete result of replaying the surface operations in a session log. */
 export interface SurfaceFoldResult {
   /** Current surface event sequences in model-visible order. */
   nodes: number[]
   /** Replacement operations in event order. */
   replacements: SurfaceFoldReplacement[]
+  /** Rewind operations in event order. */
+  rewinds: SurfaceFoldRewind[]
 }
 
 /** Readonly live projection of the message-producing session events. */
@@ -145,6 +159,8 @@ export interface SessionSurface {
 interface SurfaceFoldState {
   nodes: number[]
   replaceGeneration: number
+  /** Monotonic count of committed rewind rebases. */
+  rewindGeneration: number
 }
 
 /** A validated replacement transition that has not mutated fold state yet. */
@@ -161,7 +177,7 @@ type SurfacePlan =
 
 /** Create an empty surface fold state. */
 function createFoldState(): SurfaceFoldState {
-  return { nodes: [], replaceGeneration: 0 }
+  return { nodes: [], replaceGeneration: 0, rewindGeneration: 0 }
 }
 
 /** Whether a runtime value is a non-negative safe event sequence. */
@@ -379,19 +395,81 @@ function applySurfacePlan(
 }
 
 /**
+ * Validate a `session/rewind` event's checkpoint reference.
+ * @param event - the rewind event; its `seq` is the reference bound.
+ * @throws when the checkpoint is not a non-negative safe integer or not an
+ *   earlier existing event seq.
+ */
+function assertRewindCheckpoint(event: SessionEvent & { type: 'session/rewind' }): void {
+  const checkpoint = event.data.checkpointSeq
+  if (!Number.isSafeInteger(checkpoint) || checkpoint < 0 || checkpoint >= event.seq) {
+    throw new Error(`session/rewind at seq ${event.seq} references invalid checkpoint seq ${String(checkpoint)}`)
+  }
+}
+
+/**
+ * Fold events `[0, endSeq]` into a fresh state, honoring any
+ * `session/rewind` rebases they contain. Used to rebuild the surface at a
+ * rewind checkpoint and to fold a checkpoint prefix inside a rewind.
+ * @param events - session events in contiguous seq order.
+ * @param endSeq - inclusive last event seq to fold.
+ * @returns a fresh fold state for the prefix.
+ */
+function foldPrefixState(events: readonly SessionEvent[], endSeq: number): SurfaceFoldState {
+  const state = createFoldState()
+  for (let seq = 0; seq <= endSeq; seq++) {
+    // The bounded loop guarantees the index exists.
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    const event = events[seq]!
+    if (event.type === 'session/rewind') {
+      applyRewind(state, event, events)
+      continue
+    }
+    applySurfaceEvent(state, event, seq, events, 0)
+  }
+  return state
+}
+
+/**
+ * Apply one `session/rewind` event to fold state: validate it, rebuild the
+ * surface from its checkpoint prefix, and bump the rewind generation.
+ * @param state - the fold state to mutate.
+ * @param event - the rewind event.
+ * @param events - session events in contiguous seq order.
+ */
+function applyRewind(
+  state: SurfaceFoldState,
+  event: SessionEvent & { type: 'session/rewind' },
+  events: readonly SessionEvent[],
+): void {
+  surfaceOpOf(event)
+  assertRewindCheckpoint(event)
+  const fresh = foldPrefixState(events, event.data.checkpointSeq)
+  state.nodes = fresh.nodes
+  state.replaceGeneration = fresh.replaceGeneration
+  state.rewindGeneration += 1
+}
+
+/**
  * Replay a complete session log through the canonical surface fold.
  * @param events - session events in contiguous seq order.
- * @returns detached current sequences and replacement history.
- * @throws when an event violates surface metadata, source-event references, range, or tool-result rewrite rules.
+ * @returns detached current sequences, replacement history, and rewind operations.
+ * @throws when an event violates surface metadata, source-event references, range, tool-result rewrite, or rewind rules.
  */
 export function foldSurface(events: readonly SessionEvent[]): SurfaceFoldResult {
   const state = createFoldState()
   const replacements: SurfaceFoldReplacement[] = []
+  const rewinds: SurfaceFoldRewind[] = []
   for (const [index, event] of events.entries()) {
+    if (event.type === 'session/rewind') {
+      applyRewind(state, event, events)
+      rewinds.push({ seq: event.seq, checkpointSeq: event.data.checkpointSeq })
+      continue
+    }
     const replacement = applySurfaceEvent(state, event, index, events, 0)
     if (replacement !== undefined) replacements.push(replacement)
   }
-  return { nodes: [...state.nodes], replacements }
+  return { nodes: [...state.nodes], replacements, rewinds }
 }
 
 /** Incremental ordered surface view and append-boundary validator. */
@@ -421,6 +499,12 @@ export class SurfaceManager implements SessionSurface {
   validateNext(event: SessionEvent): void {
     if (this._lastProcessedSeq < this.baseSeq + this.log.length - 1) this._processDelta()
     const expectedSeq = this.baseSeq + this.log.length
+    if (event.type === 'session/rewind') {
+      surfaceOpOf(event)
+      assertRewindCheckpoint(event)
+      this._pendingPlan = { event, expectedSeq, plan: undefined }
+      return
+    }
     this._pendingPlan = {
       event,
       expectedSeq,
@@ -447,6 +531,15 @@ export class SurfaceManager implements SessionSurface {
       const index = seq - this.baseSeq
       // oxlint-disable-next-line typescript/no-non-null-assertion -- bounded by the loop condition
       const event = this.log[index]!
+      if (event.type === 'session/rewind') {
+        if (event.data.checkpointSeq < this.baseSeq) {
+          throw new Error(`session/rewind at seq ${event.seq} references checkpoint seq ${event.data.checkpointSeq} before window base ${this.baseSeq}`)
+        }
+        applyRewind(this._state, event, this.log)
+        this._pendingPlan = undefined
+        this._lastProcessedSeq = seq
+        continue
+      }
       const pending = this._pendingPlan
       if (pending?.event === event && pending.expectedSeq === seq) {
         applySurfacePlan(this._state, pending.plan)
@@ -457,4 +550,29 @@ export class SurfaceManager implements SessionSurface {
       this._lastProcessedSeq = seq
     }
   }
+
+  /** Monotonic count of committed rewind rebases. */
+  get rewindGeneration(): number {
+    if (this._lastProcessedSeq < this.baseSeq + this.log.length - 1) this._processDelta()
+    return this._state.rewindGeneration
+  }
+}
+
+/**
+ * Build the model-visible notice appended beside a `session/rewind` marker.
+ * The notice is an ordinary sourced `user/message`, so the next request sees
+ * the rewind in derived history ("model-visible means logged"); its
+ * `rewind` source repeats the checkpoint and optional note for programmatic
+ * consumers (UI rendering, branch pairing). Browser-safe: the fixture and
+ * web clients import this from the `./surface` subpath.
+ * @param checkpointSeq - the rewind's inclusive checkpoint event seq.
+ * @param note - optional caller annotation, repeated in the text and source.
+ * @returns a new identified user message with role `user`.
+ */
+export function buildRewindNotice(checkpointSeq: number, note?: string): UserMessage {
+  const body = 'The conversation was rewound to an earlier state; everything after that point is preserved as a branch and no longer appears in this conversation\'s history.'
+  return createUserMessage({
+    content: [{ type: 'text', text: note === undefined ? body : `${body}\n\nNote: ${note}` }],
+    source: { kind: 'rewind', checkpointSeq, ...(note === undefined ? {} : { note }) },
+  })
 }

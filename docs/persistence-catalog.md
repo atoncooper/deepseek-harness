@@ -90,7 +90,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }[T]
 ```
 
-Sources: [`packages/core/session/src/types.ts:336`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:343`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:372`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:404`](../packages/core/session/src/types.ts)
+Sources: [`packages/core/session/src/types.ts:366`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:373`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:402`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:434`](../packages/core/session/src/types.ts)
 
 ## Events
 
@@ -215,7 +215,7 @@ Source: [`packages/interaction/user-approval/src/index.ts:67`](../packages/inter
 
 Types: [StreamChunk](subsystems/llm-streaming.md)
 
-Source: [`packages/core/session/src/types.ts:266`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:278`](../packages/core/session/src/types.ts)
 
 <a id="assistantmessage--surface"></a>
 
@@ -233,7 +233,7 @@ Source: [`packages/core/session/src/types.ts:266`](../packages/core/session/src/
 
 Types: [TokenUsage](subsystems/llm-streaming.md)
 
-Source: [`packages/core/session/src/types.ts:273`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:285`](../packages/core/session/src/types.ts)
 
 ### `command/*`
 
@@ -543,7 +543,7 @@ Source: [`packages/plan/plan-mode/src/index.ts:53`](../packages/plan/plan-mode/s
 'request/context': RequestContext
 ```
 
-Source: [`packages/core/session/src/types.ts:309`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:321`](../packages/core/session/src/types.ts)
 
 <a id="requestheader--log-only"></a>
 
@@ -557,7 +557,7 @@ Source: [`packages/core/session/src/types.ts:309`](../packages/core/session/src/
 'request/header': { header: EpochHeader; reason: RequestHeaderReason }
 ```
 
-Source: [`packages/core/session/src/types.ts:304`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:316`](../packages/core/session/src/types.ts)
 
 ### `sandbox/*`
 
@@ -632,7 +632,34 @@ Source: [`packages/schedule/schedule/src/types.ts:219`](../packages/schedule/sch
 'session/end-seed': Record<string, never>
 ```
 
-Source: [`packages/core/session/src/types.ts:332`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:344`](../packages/core/session/src/types.ts)
+
+<a id="sessionrewind--log-only"></a>
+
+#### `session/rewind` — log-only
+
+```ts persistence-catalog
+/**
+ * Rebases the derived surface to an earlier event. Visible history becomes
+ * the events up to `checkpointSeq` (inclusive); the span between the
+ * checkpoint and this event is voided from derived history but stays in the
+ * log, and later appends continue after this marker. Log-only: it carries
+ * no {@link SurfaceOp} and produces no LLM message itself.
+ * {@link SessionStore.rewind} appends the marker together with a
+ * model-visible notice `user/message`, so the next request sees the rebased
+ * history and a record of the rewind.
+ *
+ * Required (no `ignorable`): a reader that does not know this type must
+ * refuse to reconstruct the log, because silently skipping the marker would
+ * restore the voided span. `checkpointSeq` must reference an earlier event
+ * (`< seq`); the surface fold validates it, and `SessionStore.rewind`
+ * additionally requires the checkpoint prefix and the append-time tail to
+ * end outside an open turn.
+ */
+'session/rewind': { checkpointSeq: number; note?: string }
+```
+
+Source: [`packages/core/session/src/types.ts:362`](../packages/core/session/src/types.ts)
 
 <a id="sessiontitle--log-only"></a>
 
@@ -674,7 +701,7 @@ Source: [`packages/session/session-title-llm/src/index.ts:43`](../packages/sessi
 'step/end': { turn: number; step: number }
 ```
 
-Source: [`packages/core/session/src/types.ts:256`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:268`](../packages/core/session/src/types.ts)
 
 <a id="stepstart--log-only"></a>
 
@@ -685,7 +712,7 @@ Source: [`packages/core/session/src/types.ts:256`](../packages/core/session/src/
 'step/start': { turn: number; step: number }
 ```
 
-Source: [`packages/core/session/src/types.ts:254`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:266`](../packages/core/session/src/types.ts)
 
 ### `subagent/*`
 
@@ -719,7 +746,7 @@ Source: [`packages/subagent/subagent/src/descriptor.ts:37`](../packages/subagent
 
 Types: [TodoItem](subsystems/session.md)
 
-Source: [`packages/core/session/src/types.ts:299`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:311`](../packages/core/session/src/types.ts)
 
 ### `tool/*`
 
@@ -738,7 +765,7 @@ Source: [`packages/core/session/src/types.ts:299`](../packages/core/session/src/
 
 Types: [CallId](subsystems/core.md)
 
-Source: [`packages/core/session/src/types.ts:279`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:291`](../packages/core/session/src/types.ts)
 
 <a id="toolcode-dispatch--log-only"></a>
 
@@ -813,7 +840,7 @@ Source: [`packages/core/tools/src/types.ts:40`](../packages/core/tools/src/types
 }
 ```
 
-Source: [`packages/core/session/src/types.ts:291`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:303`](../packages/core/session/src/types.ts)
 
 ### `tool-workflow/*`
 
@@ -893,7 +920,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:47`](../packages/workflow
 
 Types: [TurnEndReason](subsystems/session.md)
 
-Source: [`packages/core/session/src/types.ts:252`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:264`](../packages/core/session/src/types.ts)
 
 <a id="turnstart--log-only"></a>
 
@@ -909,7 +936,7 @@ Source: [`packages/core/session/src/types.ts:252`](../packages/core/session/src/
 'turn/start': { turn: number }
 ```
 
-Source: [`packages/core/session/src/types.ts:243`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:255`](../packages/core/session/src/types.ts)
 
 ### `user/*`
 
@@ -928,7 +955,7 @@ Source: [`packages/core/session/src/types.ts:243`](../packages/core/session/src/
 'user/message': UserMessage
 ```
 
-Source: [`packages/core/session/src/types.ts:264`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:276`](../packages/core/session/src/types.ts)
 
 ### `web/*`
 

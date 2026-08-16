@@ -15,7 +15,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { contentHasImage, createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
-import { isAppendSurfaceEvent, isJsonValue } from '@deepseek-ai/dsh-session'
+import { isAppendSurfaceEvent, isJsonValue, SessionRewindError } from '@deepseek-ai/dsh-session'
 import type { JsonValue, Session, SessionEvent, SessionEventMap, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionSearchCursor } from '@deepseek-ai/dsh-session-query'
@@ -2456,6 +2456,79 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }
         }
         return ok(request, { sessionId: childId })
+      },
+
+      async rewind(request) {
+        const { sessionId, atSeq, note } = request.payload
+        let source: SessionReadState
+        try {
+          source = await readSessionState(sessionId)
+        } catch (error: unknown) {
+          if (error instanceof SessionNotFound) {
+            return err(request, { code: 'session-not-found', message: error.message, details: { sessionId } })
+          }
+          return err(request, {
+            code: 'internal',
+            message: `rewind source unavailable for session "${sessionId}": ${String(error)}`,
+            details: {},
+          })
+        }
+        const events = source.events
+        // The anchor belongs to the turn containing it and must never clip
+        // backward to an earlier completed turn (mirrors the fork cut).
+        const lastSeq = events.at(-1)?.seq ?? -1
+        const anchoredBoundary = atSeq === undefined
+          ? undefined
+          : events.find(e => e.type === 'turn/end' && e.seq >= atSeq)
+        const boundary = anchoredBoundary
+          ?? (atSeq === undefined || atSeq > lastSeq
+            ? events.findLast(e => e.type === 'turn/end')
+            : undefined)
+        if (boundary === undefined) {
+          return err(request, {
+            code: 'rewind-unavailable',
+            message: atSeq !== undefined && atSeq <= lastSeq
+              ? `session "${sessionId}" has not completed the turn containing event ${String(atSeq)}`
+              : `session "${sessionId}" has no completed turn to rewind to`,
+            details: { sessionId },
+          })
+        }
+        // Extend the checkpoint through trailing out-of-band appends
+        // (session/title, injections) up to the next turn/start, so the
+        // restored state includes them, mirroring the fork cut.
+        let checkpoint = boundary.seq + 1
+        while (checkpoint < events.length && events[checkpoint]?.type !== 'turn/start') checkpoint++
+        // Rewinding appends in place, so the session must be live in the store.
+        const live = ctx.sessions.get(sessionId)
+        if (live === undefined) {
+          return err(request, {
+            code: 'rewind-unavailable',
+            message: `session "${sessionId}" is not live and cannot be rewound`,
+            details: { sessionId },
+          })
+        }
+        // A running agent keeps its turn open; close it so the rewind lands on
+        // a quiescent tail (the store rejects an open tail).
+        const agent = ctx.agents.get(sessionId)
+        if (agent !== undefined) {
+          agent.cancel({ kind: 'user' }, { keepInbox: false })
+          await agent.whenIdle()
+        }
+        try {
+          const marker = ctx.sessions.rewind(live, checkpoint - 1, note === undefined ? undefined : { note })
+          await ctx.sessions.flush(live)
+          return ok(request, { markerSeq: marker.seq })
+        } catch (error: unknown) {
+          const rewindBlocked = error instanceof SessionRewindError
+            && (error.code === 'OPEN_TURN' || error.code === 'INVALID_BOUNDARY')
+          return err(request, {
+            code: rewindBlocked ? 'rewind-unavailable' : 'internal',
+            message: rewindBlocked
+              ? `session "${sessionId}" cannot be rewound to event ${String(checkpoint - 1)}: ${error instanceof Error ? error.message : String(error)}`
+              : `failed to rewind session "${sessionId}": ${String(error)}`,
+            details: { sessionId },
+          })
+        }
       },
 
       async prompt(request) {

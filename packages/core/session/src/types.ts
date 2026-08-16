@@ -18,6 +18,18 @@ import type { JsonValue } from './json.ts'
 // `ctx.sessions` (a Host-only SessionStore) into every consumer's program.
 export type { JsonValue } from './json.ts'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /**
+     * A `user/message` notice appended beside a `session/rewind` marker.
+     * `checkpointSeq` repeats the marker's checkpoint so consumers can pair
+     * the notice with its rewind without reading the log; `note` repeats the
+     * caller's optional annotation.
+     */
+    rewind: { kind: 'rewind'; checkpointSeq: number; note?: string }
+  }
+}
+
 /** Identifies one session in the store (and its persistence artifacts). */
 export type SessionId = Branded<'SessionId'>
 
@@ -330,6 +342,24 @@ export interface SessionEventMap {
    * so tolerating concurrent writers needs a signal beyond the log.
    */
   'session/end-seed': Record<string, never>
+  /**
+   * Rebases the derived surface to an earlier event. Visible history becomes
+   * the events up to `checkpointSeq` (inclusive); the span between the
+   * checkpoint and this event is voided from derived history but stays in the
+   * log, and later appends continue after this marker. Log-only: it carries
+   * no {@link SurfaceOp} and produces no LLM message itself.
+   * {@link SessionStore.rewind} appends the marker together with a
+   * model-visible notice `user/message`, so the next request sees the rebased
+   * history and a record of the rewind.
+   *
+   * Required (no `ignorable`): a reader that does not know this type must
+   * refuse to reconstruct the log, because silently skipping the marker would
+   * restore the voided span. `checkpointSeq` must reference an earlier event
+   * (`< seq`); the surface fold validates it, and `SessionStore.rewind`
+   * additionally requires the checkpoint prefix and the append-time tail to
+   * end outside an open turn.
+   */
+  'session/rewind': { checkpointSeq: number; note?: string }
 }
 
 /** The appendable event-type keys of {@link SessionEventMap}, plugin-merged extensions included. */

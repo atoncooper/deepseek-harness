@@ -157,6 +157,18 @@ export const IconBranchOutline16 = ({ size = 16, className }: IconProps) => (
   </svg>
 )
 
+/** ic_ds_rewind_outline_16 */
+export const IconRewindOutline16 = ({ size = 16, className }: IconProps) => (
+  <svg width={size} height={size} className={className} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M7.375 3.5 L1.5 8 L7.375 12.5 Z M14.5 3.5 L8.625 8 L14.5 12.5 Z M14.75 3.5 H15.75 V12.5 H14.75 Z"
+      fill="currentColor"
+    />
+  </svg>
+)
+
 /** ic_ds_chevron_down_outline_14 */
 export const IconChevronDownOutline14 = ({ size = 14, className }: IconProps) => (
   <svg width={size} height={size} className={className} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
