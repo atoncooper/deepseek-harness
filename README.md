@@ -10,6 +10,15 @@ It uses an architecture where **everything is a plugin**, and is powered by [Cor
 
 DeepSeek Harness is currently in _developer preview_ and is iterating rapidly. **THERE WILL BE COMPATIBILITY-BREAKING CHANGES.**
 
+## This fork
+
+This fork adds **user rewind** — in-place conversation rollback:
+
+- Rewind a session's visible history to an earlier completed turn; the voided span stays in the append-only log as a branch, and a model-visible notice records the rewind.
+- Rewinding before a compaction boundary restores the original messages, because the compaction event lives in the voided span and no longer applies.
+- Every completed turn tail in the Web UI carries a “回退到这一轮” (Rewind to this turn) action; a running agent is cancelled first.
+- Core: the log-only `session/rewind` event and surface rebase, `SessionStore.rewind`, the host `session.rewind` RPC, and the client sessions service. See the [Agent Note](.agents/notes/implemented/feature/2026-08-14-session-rewind.md).
+
 ## Run
 
 ### Run from `npm`

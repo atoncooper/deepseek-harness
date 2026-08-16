@@ -10,6 +10,15 @@ DeepSeek Harness（`dsh`）是由 [DeepSeek AI](https://deepseek.com) 开发的�
 
 DeepSeek Harness 目前处于 _开发者预览_ 阶段，正在快速迭代。**未来将出现破坏兼容性的变更。**
 
+## 本分支新增
+
+本分支新增**用户回退**——就地会话回退：
+
+- 将会话可见历史回退到更早的已完成轮次；作废区间保留在只追加日志中作为分支，并追加一条模型可见的回退通知。
+- 回退到压缩点之前会恢复原始消息，因为压缩事件落在作废区间内，不再生效。
+- Web UI 每条已完成轮次尾部提供“回退到这一轮”操作；运行中的 agent 会先被取消。
+- 核心：仅日志的 `session/rewind` 事件与表面重基、`SessionStore.rewind`、host `session.rewind` RPC 与 client sessions 服务。见 [Agent Note](.agents/notes/implemented/feature/2026-08-14-session-rewind.md)。
+
 ## 运行
 
 ### 通过 `npm` 运行
