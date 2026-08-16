@@ -96,6 +96,21 @@ export interface ISessions {
    */
   fork(opts: { sessionId: SessionId; atSeq?: number; increaseTitle?: boolean }): Promise<SessionId>
   /**
+   * Rewind a live session's visible history to an earlier completed turn, in
+   * place. The host cancels a running agent, appends the durable
+   * `session/rewind` marker plus a model-visible notice, and flushes before
+   * resolving; the conversation re-renders from the event stream. The voided
+   * span stays in the log as a branch.
+   * @param opts - session id, the optional event seq anchoring the checkpoint
+   *   (the first `turn/end` at or after it; an in-log anchor in an open turn
+   *   is unavailable rather than clipped backward; falls back to the last
+   *   completed turn), and an optional user note recorded on the marker and
+   *   the notice.
+   * @returns the durable marker's event seq.
+   * @throws when the rewind fails.
+   */
+  rewind(opts: { sessionId: SessionId; atSeq?: number; note?: string }): Promise<number>
+  /**
    * Register a per-session standard-props provider (hooks become `use<Name>`
    * selector hooks on the render side; props spread verbatim).
    * @param descriptor - static member roster plus per-session resolver.

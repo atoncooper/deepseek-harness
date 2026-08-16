@@ -30,7 +30,7 @@ import type {
 // wire-fabrication boundary (the schema layer's one-cast-point posture).
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import type { CommandDescriptor, CommandExecution, CommandResult } from '@deepseek-ai/dsh-commands/types'
-import { deriveEventMessage, foldSurface } from '@deepseek-ai/dsh-session/surface'
+import { buildRewindNotice, deriveEventMessage, foldSurface } from '@deepseek-ai/dsh-session/surface'
 import type {
   ApiProxy, ClientRequest, ClientResponse, HistoryEntry, HostFrame, MuxFrame, RpcReceipt,
   ModelProviderGroup, ModelSelection, RpcRequest, RpcResponse, RpcResult, ServerRequest, ServerResponse, SessionSummary,
@@ -2358,6 +2358,48 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         }
         return ok(request, { sessionId: child.sessionId })
       },
+      rewind: (request) => {
+        const { sessionId, atSeq, note } = request.payload
+        const source = summaryOf(sessionId)
+        if (source === undefined) {
+          return err(request, {
+            code: 'session-not-found',
+            message: `no session ${sessionId}`,
+            details: { sessionId },
+          })
+        }
+        const log = logs.get(sessionId) ?? []
+        const lastSeq = log.at(-1)?.seq ?? -1
+        const anchoredBoundary = atSeq === undefined
+          ? undefined
+          : log.find(e => e.type === 'turn/end' && e.seq >= atSeq)
+        const boundary = anchoredBoundary
+          ?? (atSeq === undefined || atSeq > lastSeq
+            ? log.findLast(e => e.type === 'turn/end')
+            : undefined)
+        if (boundary === undefined) {
+          return err(request, {
+            code: 'rewind-unavailable',
+            message: atSeq !== undefined && atSeq <= lastSeq
+              ? `session ${sessionId} has not completed the turn containing event ${String(atSeq)}`
+              : `session ${sessionId} has no completed turn`,
+            details: { sessionId },
+          })
+        }
+        let checkpoint = boundary.seq + 1
+        while (checkpoint < log.length && log[checkpoint]?.type !== 'turn/start') checkpoint++
+        const markerSeq = log.length
+        append(sessionId, {
+          type: 'session/rewind',
+          data: { checkpointSeq: checkpoint - 1, ...(note === undefined ? {} : { note }) },
+        })
+        append(sessionId, {
+          type: 'user/message',
+          data: buildRewindNotice(checkpoint - 1, note),
+          surfaceOp: 'append',
+        })
+        return ok(request, { markerSeq })
+      },
       history: async (request) => {
         const log = logs.get(request.payload.sessionId) ?? []
         // Snapshot at request time, deliver after the transit delay (mirrors a real host under latency).
@@ -3085,6 +3127,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'session.selectModel': return this.api.sessions.selectModel(request)
       case 'session.rename': return this.api.sessions.rename(request)
       case 'session.fork': return this.api.sessions.fork(request)
+      case 'session.rewind': return this.api.sessions.rewind(request)
       case 'session.prompt': return this.api.sessions.prompt(request)
       case 'session.attachment': return this.api.sessions.attachment(request)
       case 'session.updateQueue': return this.api.sessions.updateQueue(request)

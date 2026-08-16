@@ -16,7 +16,7 @@ import { SESSION_FORMAT_VERSION, SessionId } from './types.ts'
 import type { TypertLookup } from '@deepseek-ai/dsh-typert-protocol'
 import type { CreateSessionOptions, EpochHeader, PrepareSessionOptions, RequestContext, SessionEvent, SessionEventMap, SessionEventType, SessionHeader, SurfaceIntent, SurfaceEventType } from './types.ts'
 import { snapshotJsonValue } from './json.ts'
-import { deriveEventMessage, SurfaceManager } from './surface.ts'
+import { buildRewindNotice, deriveEventMessage, SurfaceManager } from './surface.ts'
 import type { SessionSurface } from './surface.ts'
 import { foldRequestHeader } from './request-header.ts'
 
@@ -29,8 +29,8 @@ export type { JsonValue } from './json.ts'
 export { interruptedTurnClosers, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN } from './repair.ts'
 export { decodeStorageRecord, packChunkRuns } from './chunk-rows.ts'
 export type { ChunkRow, StorageRecord } from './chunk-rows.ts'
-export type { SessionSurface, SurfaceFoldReplacement, SurfaceFoldResult } from './surface.ts'
-export { deriveEventMessage, foldSurface, isAppendSurfaceEvent, isReplacementSurfaceEvent, isSurfaceEvent, isSurfaceEligibleType } from './surface.ts'
+export type { SessionSurface, SurfaceFoldReplacement, SurfaceFoldResult, SurfaceFoldRewind } from './surface.ts'
+export { buildRewindNotice, deriveEventMessage, foldSurface, isAppendSurfaceEvent, isReplacementSurfaceEvent, isSurfaceEvent, isSurfaceEligibleType } from './surface.ts'
 export { canonicalHeader, foldRequestHeader, headerEquals } from './request-header.ts'
 export { KNOWN_SESSION_EVENT_TYPES } from './known-event-types.ts'
 
@@ -704,33 +704,37 @@ export class Session {
   private derivedNodes = 0
   /** {@link SurfaceManager.replaceGeneration} the cache was built under. */
   private derivedGeneration = 0
+  /** {@link SurfaceManager.rewindGeneration} the cache was built under. */
+  private derivedRewindGeneration = 0
 
   /**
    * Derive the LLM message history by walking the ordered sequences of
    * message-producing events maintained by `surfaceOp` markers. The
    * surface is the single source of derived history: every message-producing
    * append records its `surfaceOp`, so a raw event with no marker (a chunk, a
-   * turn boundary) is correctly absent, and a compaction `replace` deletes the
-   * shadowed nodes from the derivation. The projection rules are
+   * turn boundary) is correctly absent, a compaction `replace` deletes the
+   * shadowed nodes from the derivation, and a `session/rewind` rebases the
+   * derivation to its checkpoint. The projection rules are
    * {@link deriveEventMessage}, folded per node.
    *
    * CACHED: each surface node is projected exactly once, when first seen — a
-   * call costs O(new nodes), and a surface rewrite (a `replace`;
-   * {@link SessionSurface.replaceGeneration}) rebuilds. The returned array is
-   * a fresh snapshot per call (later appends never grow an array a caller
-   * already holds); the `Message` objects in it are SHARED and **deep-frozen**.
+   * call costs O(new nodes), and a surface rewrite (a `replace` or a
+   * `session/rewind` rebase) rebuilds. The returned array is a fresh
+   * snapshot per call (later appends never grow an array a caller already
+   * holds); the `Message` objects in it are SHARED and **deep-frozen**.
    * Their content reuses the already frozen durable event data, so the cache
    * needs no second deep clone and consumers still cannot mutate the log.
    * @returns a fresh array of the shared, frozen derived history.
    */
   deriveMessages(): Message[] {
-    const surface = this.surface
-    const nodes = surface.nodes
-    const generation = surface.replaceGeneration
-    if (generation !== this.derivedGeneration) {
+    const nodes = this.surfaceManager.nodes
+    const generation = this.surfaceManager.replaceGeneration
+    const rewindGeneration = this.surfaceManager.rewindGeneration
+    if (generation !== this.derivedGeneration || rewindGeneration !== this.derivedRewindGeneration) {
       this.derived = []
       this.derivedNodes = 0
       this.derivedGeneration = generation
+      this.derivedRewindGeneration = rewindGeneration
     }
     for (const seq of nodes.slice(this.derivedNodes)) {
       // Surface sequences are built from this.log — seq is always a valid
@@ -780,6 +784,27 @@ export class SessionForkError extends Error {
   constructor(message: string, public readonly code: SessionForkErrorCode) {
     super(message)
     this.name = 'SessionForkError'
+  }
+}
+
+/**
+ * Rejection codes for session rewinding: the rewind source id is unknown to
+ * the live store (`SESSION_NOT_FOUND`) or names a session object that is not
+ * the store's live instance (`SESSION_NOT_LIVE`); the boundary is not a
+ * contiguous existing seq (`INVALID_BOUNDARY`); or either the checkpoint
+ * prefix or the append-time tail ends inside an open turn (`OPEN_TURN`).
+ */
+export type SessionRewindErrorCode =
+  | 'SESSION_NOT_FOUND'
+  | 'SESSION_NOT_LIVE'
+  | 'INVALID_BOUNDARY'
+  | 'OPEN_TURN'
+
+/** Typed error for session rewind rejections. */
+export class SessionRewindError extends Error {
+  constructor(message: string, public readonly code: SessionRewindErrorCode) {
+    super(message)
+    this.name = 'SessionRewindError'
   }
 }
 
@@ -1149,6 +1174,94 @@ export class SessionStore extends Service {
       throw new SessionForkError(`session "${source.id}" not found`, 'SESSION_NOT_FOUND')
     }
     if (live !== source) throw new SessionForkError(`session "${source.id}" is not the live store instance`, 'SESSION_NOT_LIVE')
+    return source
+  }
+
+  /**
+   * Rebase a live session's derived surface to an earlier event and append a
+   * model-visible notice. Appends a durable `session/rewind` marker whose
+   * `checkpointSeq` is the inclusive `boundary` event seq, then appends the
+   * notice `user/message` built by {@link buildRewindNotice}. Derived history
+   * after this call is the checkpoint prefix plus later appends; the voided
+   * span stays in the log as a branch.
+   *
+   * @param source - Live source session object or id.
+   * @param boundary - Inclusive event seq to rewind to. Must exist and the
+   *   prefix up to it must end outside an open turn; the log tail at append
+   *   time must also be outside an open turn (cancel a running agent first).
+   * @param options - Optional `note` annotation stored on the marker and the
+   *   notice.
+   * @returns the appended `session/rewind` event.
+   * @throws {@link SessionRewindError} when the source is unknown or not the
+   *   live instance, or the boundary is invalid or ends inside an open turn.
+   */
+  rewind(
+    source: Session | SessionId,
+    boundary: number,
+    options?: { readonly note?: string },
+  ): SessionEvent<'session/rewind'> {
+    const live = this._resolveRewindSource(source)
+    const checkpoint = this._rewindCheckpoint(live, boundary)
+    const marker = live.append('session/rewind', {
+      checkpointSeq: checkpoint,
+      ...(options?.note === undefined ? {} : { note: options.note }),
+    })
+    live.append('user/message', buildRewindNotice(checkpoint, options?.note), { surfaceOp: 'append' })
+    return marker
+  }
+
+  private _rewindCheckpoint(session: Session, requestedBoundary: number): number {
+    const events = session.events
+    if (!Number.isSafeInteger(requestedBoundary) || requestedBoundary < 0) {
+      throw new SessionRewindError(
+        `rewind boundary for session "${session.id}" must be a non-negative safe integer, got ${String(requestedBoundary)}`,
+        'INVALID_BOUNDARY',
+      )
+    }
+    if (requestedBoundary >= events.length) {
+      const lastSeq = events.at(-1)?.seq
+      throw new SessionRewindError(
+        `rewind boundary ${requestedBoundary} does not exist in session "${session.id}" (last seq: ${lastSeq ?? 'none'})`,
+        'INVALID_BOUNDARY',
+      )
+    }
+    const boundaryEvent = events[requestedBoundary]
+    if (boundaryEvent === undefined || boundaryEvent.seq !== requestedBoundary) {
+      throw new SessionRewindError(
+        `rewind boundary ${requestedBoundary} does not match a contiguous event seq in session "${session.id}"`,
+        'INVALID_BOUNDARY',
+      )
+    }
+    const prefixLastTurn = events.slice(0, requestedBoundary + 1)
+      .findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
+    if (prefixLastTurn?.type === 'turn/start') {
+      throw new SessionRewindError(
+        `rewind boundary ${requestedBoundary} in session "${session.id}" ends inside open turn ${prefixLastTurn.data.turn}`,
+        'OPEN_TURN',
+      )
+    }
+    const tailLastTurn = events.findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
+    if (tailLastTurn?.type === 'turn/start') {
+      throw new SessionRewindError(
+        `session "${session.id}" has an open turn ${tailLastTurn.data.turn} at its tail; cancel the running turn before rewinding`,
+        'OPEN_TURN',
+      )
+    }
+    return requestedBoundary
+  }
+
+  private _resolveRewindSource(source: Session | SessionId): Session {
+    if (typeof source === 'string') {
+      const session = this.get(source)
+      if (session === undefined) throw new SessionRewindError(`session "${source}" not found`, 'SESSION_NOT_FOUND')
+      return session
+    }
+
+    const live = this.get(source.id)
+    if (live === undefined) {
+      throw new SessionRewindError(`session "${source.id}" not found`, 'SESSION_NOT_FOUND')
+    }
+    if (live !== source) throw new SessionRewindError(`session "${source.id}" is not the live store instance`, 'SESSION_NOT_LIVE')
     return source
   }
 

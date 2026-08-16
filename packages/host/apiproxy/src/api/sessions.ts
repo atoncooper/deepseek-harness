@@ -338,6 +338,22 @@ export interface SessionsApi {
   Promise<RpcResponse<{ sessionId: SessionId }>>
 
   /**
+   * Rebases a live session's visible history to an earlier completed turn,
+   * in place. `atSeq` anchors the checkpoint exactly like fork: the boundary
+   * is the first `turn/end` at or after it (a message's rewind action passes
+   * the message seq, so the rewind restores that whole turn); a boundary past
+   * the log end, or an omitted `atSeq`, falls back to the source's last
+   * completed turn. An in-log anchor whose turn is still open fails with
+   * `rewind-unavailable` instead of clipping backward. A running agent for
+   * the session is cancelled first so its active turn closes; then the durable
+   * `session/rewind` marker and a model-visible notice are appended and the
+   * session is flushed before the call resolves. The voided span stays in the
+   * log as a branch. Only live sessions can be rewound.
+   */
+  rewind(request: RpcRequest<{ sessionId: SessionId; atSeq?: number; note?: string }>):
+  Promise<RpcResponse<{ markerSeq: number }>>
+
+  /**
    * Sends text and temporary image bytes to an ordinary session Agent after durable host admission.
    * Browser callers attach their current IANA zone;
    * the Host validates, canonicalizes, and records it on that exact user message. Omission remains

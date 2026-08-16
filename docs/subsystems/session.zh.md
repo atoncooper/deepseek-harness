@@ -121,6 +121,24 @@ interface SessionEventMap {
    * so tolerating concurrent writers needs a signal beyond the log.
    */
   'session/end-seed': Record<string, never>
+  /**
+   * Rebases the derived surface to an earlier event. Visible history becomes
+   * the events up to `checkpointSeq` (inclusive); the span between the
+   * checkpoint and this event is voided from derived history but stays in the
+   * log, and later appends continue after this marker. Log-only: it carries
+   * no {@link SurfaceOp} and produces no LLM message itself.
+   * {@link SessionStore.rewind} appends the marker together with a
+   * model-visible notice `user/message`, so the next request sees the rebased
+   * history and a record of the rewind.
+   *
+   * Required (no `ignorable`): a reader that does not know this type must
+   * refuse to reconstruct the log, because silently skipping the marker would
+   * restore the voided span. `checkpointSeq` must reference an earlier event
+   * (`< seq`); the surface fold validates it, and `SessionStore.rewind`
+   * additionally requires the checkpoint prefix and the append-time tail to
+   * end outside an open turn.
+   */
+  'session/rewind': { checkpointSeq: number; note?: string }
 }
 ```
 
@@ -330,7 +348,7 @@ interface SessionSurface {
 
 ### `SurfaceFoldReplacement` 与 `SurfaceFoldResult`：完整的 surface 回放
 
-`foldSurface(events)` 返回一份独立的当前事件 seq 列表，以及每个声明的替换范围实际遮蔽的 seq。实时管理器复用同一套状态转换，但不保留替换历史。每提交一次替换，其 `replaceGeneration` 就递增一次，使增量消费方能够区分纯尾部增长与重写。
+`foldSurface(events)` 返回一份独立的当前事件 seq 列表、每个声明的替换范围实际遮蔽的 seq，以及每次 rewind 重基。实时管理器复用同一套状态转换，但不保留替换历史。每提交一次替换，其 `replaceGeneration` 就递增一次，使增量消费方能够区分纯尾部增长与重写。`session/rewind` 事件会把 surface 重基到其 `checkpointSeq` 前缀：检查点与标记之间的作废区间不再贡献节点，落在该区间内的压缩永不生效——回退到压缩边界之前会恢复原始消息。重基对管理器的 rewind 代次是单调递增的，因此即使替换计数不变，派生消息缓存也会在每次回退时失效。
 
 ```ts type-equiv
 /** One replacement operation observed while folding a session surface. */
@@ -347,12 +365,24 @@ interface SurfaceFoldReplacement {
 ```
 
 ```ts type-equiv
+/** One rewind operation observed while folding a session surface. */
+interface SurfaceFoldRewind {
+  /** Seq of the session/rewind event that rebased the surface. */
+  seq: number
+  /** Inclusive checkpoint seq the surface was rebased to. */
+  checkpointSeq: number
+}
+```
+
+```ts type-equiv
 /** Complete result of replaying the surface operations in a session log. */
 interface SurfaceFoldResult {
   /** Current surface event sequences in model-visible order. */
   nodes: number[]
   /** Replacement operations in event order. */
   replacements: SurfaceFoldReplacement[]
+  /** Rewind operations in event order. */
+  rewinds: SurfaceFoldRewind[]
 }
 ```
 
@@ -494,15 +524,16 @@ declare class Session {
    * message-producing events maintained by `surfaceOp` markers. The
    * surface is the single source of derived history: every message-producing
    * append records its `surfaceOp`, so a raw event with no marker (a chunk, a
-   * turn boundary) is correctly absent, and a compaction `replace` deletes the
-   * shadowed nodes from the derivation. The projection rules are
+   * turn boundary) is correctly absent, a compaction `replace` deletes the
+   * shadowed nodes from the derivation, and a `session/rewind` rebases the
+   * derivation to its checkpoint. The projection rules are
    * {@link deriveEventMessage}, folded per node.
    *
    * CACHED: each surface node is projected exactly once, when first seen — a
-   * call costs O(new nodes), and a surface rewrite (a `replace`;
-   * {@link SessionSurface.replaceGeneration}) rebuilds. The returned array is
-   * a fresh snapshot per call (later appends never grow an array a caller
-   * already holds); the `Message` objects in it are SHARED and **deep-frozen**.
+   * call costs O(new nodes), and a surface rewrite (a `replace` or a
+   * `session/rewind` rebase) rebuilds. The returned array is a fresh
+   * snapshot per call (later appends never grow an array a caller already
+   * holds); the `Message` objects in it are SHARED and **deep-frozen**.
    * Their content reuses the already frozen durable event data, so the cache
    * needs no second deep clone and consumers still cannot mutate the log.
    * @returns a fresh array of the shared, frozen derived history.

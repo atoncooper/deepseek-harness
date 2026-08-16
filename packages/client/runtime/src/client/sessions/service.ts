@@ -135,6 +135,22 @@ export class SessionForkError extends Error {
   }
 }
 
+/** Structured session-rewind failure. */
+export class SessionRewindError extends Error {
+  override readonly name = 'SessionRewindError'
+
+  /**
+   * @param rpcError - Host business or folded transport error.
+   * @param sessionId - the session that could not be rewound.
+   */
+  constructor(
+    readonly rpcError: RpcError,
+    readonly sessionId: SessionId,
+  ) {
+    super(`session rewind failed: ${rpcError.code}: ${rpcError.message}`)
+  }
+}
+
 /** Session assembly handle for SessionProvider/inject factories (identity-stable per session). */
 export interface SessionBinding {
   readonly sessionId: SessionId
@@ -529,6 +545,36 @@ export class SessionRuntime implements ISessions {
       if (!renamed.ok) throw new Error(`fork child rename failed: ${renamed.error.code}: ${renamed.error.message}`)
     }
     return childId
+  }
+
+  /**
+   * Rewind a live session's visible history to an earlier completed turn, in
+   * place. The host cancels a running agent, appends the durable
+   * `session/rewind` marker plus a model-visible notice, and flushes before
+   * resolving. On resolution the session's derived history is the checkpoint
+   * prefix plus the notice; the voided span stays in the log as a branch. The
+   * conversation re-renders from the event stream, so no local projection
+   * update is needed.
+   * @param opts - session id, the optional event seq anchoring the checkpoint
+   *   (the first `turn/end` at or after it; falls back to the last completed
+   *   turn), and an optional user note recorded on the marker and notice.
+   * @returns the durable marker's event seq.
+   * @throws {SessionRewindError} with the session id.
+   */
+  async rewind(opts: {
+    sessionId: SessionId
+    atSeq?: number
+    note?: string
+  }): Promise<number> {
+    const result = await this.manager.rewind({
+      sessionId: opts.sessionId,
+      // Flooring lands inside the anchor's own turn, so the host's
+      // first-turn/end-at-or-after cut still ends on that turn (mirrors fork).
+      ...(opts.atSeq === undefined ? {} : { atSeq: Math.floor(opts.atSeq) }),
+      ...(opts.note === undefined ? {} : { note: opts.note }),
+    })
+    if (!result.ok) throw new SessionRewindError(result.error, opts.sessionId)
+    return result.value.markerSeq
   }
 
   /**

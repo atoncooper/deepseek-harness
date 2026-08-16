@@ -155,6 +155,16 @@ function validateEvent(
       }
       break
     }
+    case 'session/rewind': {
+      const checkpoint = event.data.checkpointSeq
+      if (!Number.isSafeInteger(checkpoint) || checkpoint < 0 || checkpoint >= event.seq) {
+        fail(`session/rewind at seq ${event.seq} references invalid checkpoint seq ${String(checkpoint)}`)
+      }
+      if (trace.openTurn !== null) {
+        fail(`session/rewind at seq ${event.seq} appended inside open turn ${trace.openTurn}`)
+      }
+      break
+    }
     default:
       // Merge-extensible event relations belong to their owning plugin.
       break

@@ -421,6 +421,14 @@ export function apply(ctx: Context): void {
               // Fork or child-rename failure keeps the source view untouched.
             })
         },
+        rewindAt: (seq) => {
+          // The host cancels a running agent and flushes before resolving; the
+          // conversation re-renders from the appended marker + notice frames.
+          sessions.rewind({ sessionId, atSeq: seq })
+            .catch(() => {
+              // Rewind failure keeps the source view untouched.
+            })
+        },
       }
     },
   }, ChatView)

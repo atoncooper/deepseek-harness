@@ -54,6 +54,7 @@ function scriptedApi(overrides: {
       }),
       rename: r => ok(r, { title: 'renamed', seq: 0 }),
       fork: r => ok(r, { sessionId: sid('s-fork') }),
+      rewind: r => ok(r, { markerSeq: 1 }),
       prompt: r => ok(r, { accepted: true as const }),
       attachment: r => ok(r, {
         attachment: { attachmentId: 'a' as never, mediaType: 'image/png', bytes: 1, width: 1, height: 1 },
